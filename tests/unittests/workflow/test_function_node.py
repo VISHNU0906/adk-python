@@ -1259,6 +1259,39 @@ async def test_output_schema_inferred_coerces_defaults(
   }
 
 
+class _NullableNoteModel(BaseModel):
+  name: str
+  note: str | None
+  tag: str | None = None
+
+
+@pytest.mark.asyncio
+async def test_required_nullable_output_field_reaches_next_node(
+    request: pytest.FixtureRequest,
+):
+  """A None on a required nullable field reaches the next node as None."""
+
+  def produce() -> _NullableNoteModel:
+    return _NullableNoteModel(name='x', note=None, tag=None)
+
+  def consume(node_input: _NullableNoteModel) -> str:
+    return f'name={node_input.name} note={node_input.note} tag={node_input.tag}'
+
+  agent = Workflow(
+      name='wf',
+      edges=[(START, FunctionNode(func=produce), FunctionNode(func=consume))],
+  )
+  events, _, _ = await run_workflow(agent)
+
+  outputs = [
+      e.output for e in events if isinstance(e, Event) and e.output is not None
+  ]
+  assert outputs == [
+      {'name': 'x', 'note': None},
+      'name=x note=None tag=None',
+  ]
+
+
 @pytest.mark.asyncio
 async def test_output_schema_inferred_from_return_hint(
     request: pytest.FixtureRequest,

@@ -307,6 +307,53 @@ def _strip_json_code_fence(json_text: str) -> str:
   return json_text
 
 
+def _restorable_none_fields(value: Any) -> Any:
+  """Returns a ``model_dump`` exclude spec for fields that are safe to drop.
+
+  A field set to ``None`` is dropped only when validating the dump again
+  restores that ``None``: the field is not required and its default is
+  ``None``. A required ``X | None`` field keeps its ``None``; dropping it
+  made the next node's input validation fail with "Field required".
+  """
+  if isinstance(value, BaseModel):
+    spec: dict[Any, Any] = {}
+    for name, field in type(value).model_fields.items():
+      field_value = getattr(value, name, None)
+      if field_value is None:
+        if (
+            not field.is_required()
+            and field.default_factory is None
+            and field.default is None
+        ):
+          spec[name] = True
+      elif nested := _restorable_none_fields(field_value):
+        spec[name] = nested
+    for name, extra_value in (value.__pydantic_extra__ or {}).items():
+      if extra_value is None:
+        spec[name] = True
+      elif nested := _restorable_none_fields(extra_value):
+        spec[name] = nested
+    return spec
+  if isinstance(value, (list, tuple)):
+    return {
+        index: nested
+        for index, item in enumerate(value)
+        if (nested := _restorable_none_fields(item))
+    }
+  if isinstance(value, dict):
+    return {
+        key: nested
+        for key, item in value.items()
+        if (nested := _restorable_none_fields(item))
+    }
+  return {}
+
+
+def _dump_model(model: BaseModel) -> dict[str, Any]:
+  """Dumps a validated model, dropping only the ``None`` fields it restores."""
+  return model.model_dump(exclude=_restorable_none_fields(model) or None)
+
+
 def validate_schema(schema: SchemaType, json_text: str) -> Any:
   """Validate JSON text against a schema and return the result.
 
@@ -328,12 +375,12 @@ def validate_schema(schema: SchemaType, json_text: str) -> Any:
       schema = get_args(schema)[0]
     # is_basemodel_schema verified schema is now a BaseModel subclass.
     model = cast(type[BaseModel], schema)
-    return model.model_validate_json(json_text).model_dump(exclude_none=True)
+    return _dump_model(model.model_validate_json(json_text))
   elif is_list_of_basemodel(schema):
     # For list[BaseModel], use TypeAdapter to validate
     type_adapter: TypeAdapter[list[BaseModel]] = TypeAdapter(schema)
     validated = type_adapter.validate_json(json_text)
-    return [item.model_dump(exclude_none=True) for item in validated]
+    return [_dump_model(item) for item in validated]
   else:
     # For other schema types (list[str], dict, Schema, etc.),
     return _json_utils.safe_json_loads(json_text, context="schema value")
@@ -423,7 +470,7 @@ def validate_node_data(
 
   def _to_serializable(val: Any) -> Any:
     if isinstance(val, BaseModel):
-      return val.model_dump(exclude_none=True)
+      return _dump_model(val)
     if isinstance(val, list):
       return [_to_serializable(item) for item in val]
     if isinstance(val, dict):

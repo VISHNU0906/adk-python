@@ -181,6 +181,30 @@ class TestValidateSchema:
     result = validate_schema(ModelWithOptional, json_text)
     assert result == {"name": "test"}
 
+  def test_basemodel_schema_keeps_none_for_required_field(self):
+    """A required nullable field keeps its None so the dump validates again."""
+
+    class ModelWithRequiredNullable(BaseModel):
+      name: str
+      note: str | None
+
+    json_text = '{"name": "test", "note": null}'
+    result = validate_schema(ModelWithRequiredNullable, json_text)
+    assert result == {"name": "test", "note": None}
+    assert ModelWithRequiredNullable.model_validate(result).note is None
+
+  def test_list_of_basemodel_schema_keeps_none_for_required_field(self):
+    """Each list item keeps None on required fields and drops it on defaults."""
+
+    class Item(BaseModel):
+      name: str
+      note: str | None
+      tag: str | None = None
+
+    json_text = '[{"name": "a", "note": null, "tag": null}]'
+    result = validate_schema(list[Item], json_text)
+    assert result == [{"name": "a", "note": None}]
+
   def test_list_of_basemodel_schema(self):
     """Test validation with a list[BaseModel] schema."""
     json_text = '[{"name": "item1", "value": 1}, {"name": "item2", "value": 2}]'
@@ -302,6 +326,69 @@ class TestValidateSchema:
 
 class TestValidateNodeData:
   """Tests for validate_node_data function."""
+
+  def test_required_nullable_field_keeps_none(self):
+    """A required X | None field set to None survives the dump (#8047)."""
+
+    class Item(BaseModel):
+      name: str
+      note: str | None
+
+    result = validate_node_data(Item, Item(name="x", note=None))
+
+    assert result == {"name": "x", "note": None}
+    # The dump is what the next node validates against its input schema.
+    assert validate_node_data(Item, result) == {"name": "x", "note": None}
+
+  def test_only_none_fields_restored_by_their_default_are_dropped(self):
+    """None is dropped only where validating the dump restores that None."""
+
+    class Inner(BaseModel):
+      required: int | None
+      optional: int | None = None
+
+    class Outer(BaseModel):
+      inner: Inner
+      items: list[Inner]
+      by_key: dict[str, Inner]
+      defaults_to_none: str | None = None
+      defaults_to_value: str | None = "fallback"
+      factory: list[int] | None = Field(default_factory=list)
+      plain: dict[str, int | None]
+
+    inner = Inner(required=None, optional=None)
+    data = Outer(
+        inner=inner,
+        items=[inner, Inner(required=1, optional=2)],
+        by_key={"k": inner},
+        defaults_to_none=None,
+        defaults_to_value=None,
+        factory=None,
+        plain={"a": None},
+    )
+
+    result = validate_node_data(Outer, data)
+
+    assert result == {
+        "inner": {"required": None},
+        "items": [{"required": None}, {"required": 1, "optional": 2}],
+        "by_key": {"k": {"required": None}},
+        "defaults_to_value": None,
+        "factory": None,
+        "plain": {"a": None},
+    }
+    assert Outer.model_validate(result) == data
+
+  def test_none_extra_fields_are_dropped(self):
+    """Extra fields set to None are dropped, as before."""
+
+    class Open(BaseModel):
+      model_config = ConfigDict(extra="allow")
+      name: str
+
+    result = validate_node_data(Open, {"name": "x", "gone": None, "kept": 1})
+
+    assert result == {"name": "x", "kept": 1}
 
   @pytest.mark.parametrize("with_media", [False, True])
   @pytest.mark.parametrize("preserve_content", [False, True])
